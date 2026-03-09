@@ -1,0 +1,55 @@
+# ─────────────────────────────────────────────────────────────
+# Content Ops — Daily Scheduled Poster
+# Runs once per day at 09:00 UTC
+# ─────────────────────────────────────────────────────────────
+name: Daily Content Poster
+
+on:
+  schedule:
+    - cron: "0 9 * * *"          # 09:00 UTC every day
+  workflow_dispatch:               # manual trigger for testing
+
+permissions:
+  contents: write                  # needed to push CSV updates back
+
+jobs:
+  post-content:
+    runs-on: ubuntu-latest
+
+    env:
+      LINKEDIN_ACCESS_TOKEN:  ${{ secrets.LINKEDIN_ACCESS_TOKEN }}
+      LINKEDIN_PERSON_URN:    ${{ secrets.LINKEDIN_PERSON_URN }}
+      INSTAGRAM_ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS_TOKEN }}
+      INSTAGRAM_USER_ID:      ${{ secrets.INSTAGRAM_USER_ID }}
+      GITHUB_BRANCH:          main
+
+    steps:
+      # ── 1. Checkout repo ─────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 2. Set up Python ─────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ── 3. Install dependencies ──────────────────────────
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── 4. Run the poster script ─────────────────────────
+      - name: Run poster.py
+        run: python poster.py
+
+      # ── 5. Commit & push CSV changes ─────────────────────
+      - name: Commit updated CSV
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add content.csv
+          git diff --cached --quiet || git commit -m "🤖 Auto-update content.csv status [skip ci]"
+          git push
