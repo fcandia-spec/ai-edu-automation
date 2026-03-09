@@ -5,19 +5,16 @@ Reads content.csv, filters rows scheduled for today with status='pending',
 posts to LinkedIn and/or Instagram, and updates the CSV status accordingly.
 
 Usage:
-    python poster.py              # normal run (posts to APIs)
-    python poster.py --dry-run    # log what WOULD be posted, skip API calls
+    python poster.py              # normal run (posts to APIs, or mock if no tokens)
+    python poster.py --dry-run    # log what WOULD be posted, skip all logic
 """
 
 import csv
 import os
 import sys
-import json
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
-
-import requests
 
 # ── Logging ─────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -40,17 +37,29 @@ FIELDNAMES = [
 ]
 
 # GitHub repo info for building raw image URLs
-GITHUB_REPO = os.getenv("GITHUB_REPOSITORY", "")  # e.g. "user/ai-edu-automation"
+GITHUB_REPO = os.getenv("GITHUB_REPOSITORY", "")
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
 
 # ── API Credentials (from GitHub Secrets / env vars) ────────────────────────
 LINKEDIN_ACCESS_TOKEN = os.getenv("LINKEDIN_ACCESS_TOKEN", "")
-LINKEDIN_PERSON_URN = os.getenv("LINKEDIN_PERSON_URN", "")  # "urn:li:person:XXXXXX"
+LINKEDIN_PERSON_URN = os.getenv("LINKEDIN_PERSON_URN", "")
 
 INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN", "")
 INSTAGRAM_USER_ID = os.getenv("INSTAGRAM_USER_ID", "")
 
 DRY_RUN = "--dry-run" in sys.argv
+
+# ── Lazy import: only load requests when we actually need it ────────────────
+_requests = None
+
+
+def _get_requests():
+    """Lazy-import requests only when real API calls are needed."""
+    global _requests
+    if _requests is None:
+        import requests as _req  # noqa: F811
+        _requests = _req
+    return _requests
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -59,15 +68,15 @@ DRY_RUN = "--dry-run" in sys.argv
 
 def read_csv() -> list[dict]:
     """Read the content CSV and return a list of row dicts."""
-    with open(CSV_PATH, mode="r", encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
+    with open(CSV_PATH, mode="r", encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh)
         return list(reader)
 
 
 def write_csv(rows: list[dict]) -> None:
     """Overwrite the content CSV with the (potentially updated) rows."""
-    with open(CSV_PATH, mode="w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=FIELDNAMES, quoting=csv.QUOTE_ALL)
+    with open(CSV_PATH, mode="w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=FIELDNAMES, quoting=csv.QUOTE_ALL)
         writer.writeheader()
         writer.writerows(rows)
 
@@ -81,7 +90,24 @@ def build_image_url(relative_path: str) -> str:
     """Convert a repo-relative image path to a GitHub raw URL."""
     if not relative_path:
         return ""
-    return f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/{relative_path.strip()}"
+    return (
+        f"https://raw.githubusercontent.com/"
+        f"{GITHUB_REPO}/{GITHUB_BRANCH}/{relative_path.strip()}"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  MOCK HELPERS — used when API tokens are not configured
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _mock_post(platform: str, text: str, image_urls: list[str] | None = None) -> dict:
+    """Simulate a successful post when credentials are missing."""
+    preview = text[:80].replace("\n", " ")
+    logger.info("Mock: Posting to %s...", platform.upper())
+    logger.info("  Text: %s", preview)
+    if image_urls:
+        logger.info("  Images: %s", image_urls)
+    return {"id": f"mock-{platform}-id"}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -91,23 +117,24 @@ def build_image_url(relative_path: str) -> str:
 def post_to_linkedin(text: str, image_urls: list[str] | None = None) -> dict:
     """
     Create a LinkedIn text post (UGC Post).
-    Image support will be added in a later phase.
-    Returns the API response as a dict.
+    Falls back to mock mode if credentials are not set.
     """
     if DRY_RUN:
         logger.info("[DRY-RUN] Would post to LinkedIn: %s", text[:80])
         return {"id": "dry-run-linkedin-id"}
 
+    # ── Mock fallback ───────────────────────────────────────────────────
     if not LINKEDIN_ACCESS_TOKEN or not LINKEDIN_PERSON_URN:
-        raise ValueError("LinkedIn credentials not configured. Set LINKEDIN_ACCESS_TOKEN and LINKEDIN_PERSON_URN.")
+        return _mock_post("linkedin", text, image_urls)
 
+    # ── Real API call ───────────────────────────────────────────────────
+    req = _get_requests()
     url = "https://api.linkedin.com/v2/ugcPosts"
     headers = {
         "Authorization": f"Bearer {LINKEDIN_ACCESS_TOKEN}",
         "Content-Type": "application/json",
         "X-Restli-Protocol-Version": "2.0.0",
     }
-
     payload = {
         "author": LINKEDIN_PERSON_URN,
         "lifecycleState": "PUBLISHED",
@@ -122,7 +149,7 @@ def post_to_linkedin(text: str, image_urls: list[str] | None = None) -> dict:
         },
     }
 
-    resp = requests.post(url, headers=headers, json=payload, timeout=30)
+    resp = req.post(url, headers=headers, json=payload, timeout=30)
     resp.raise_for_status()
     return resp.json()
 
@@ -133,23 +160,23 @@ def post_to_linkedin(text: str, image_urls: list[str] | None = None) -> dict:
 
 def post_to_instagram(text: str, image_urls: list[str] | None = None) -> dict:
     """
-    Two-step Instagram publish via Meta Graph API:
-      1. POST /{ig-user-id}/media  → get creation_id
-      2. POST /{ig-user-id}/media_publish  → publish
-    Requires at least one image URL for image posts.
-    Returns the API response as a dict.
+    Two-step Instagram publish via Meta Graph API.
+    Falls back to mock mode if credentials are not set.
     """
     if DRY_RUN:
         logger.info("[DRY-RUN] Would post to Instagram: %s", text[:80])
         return {"id": "dry-run-instagram-id"}
 
+    # ── Mock fallback ───────────────────────────────────────────────────
     if not INSTAGRAM_ACCESS_TOKEN or not INSTAGRAM_USER_ID:
-        raise ValueError("Instagram credentials not configured. Set INSTAGRAM_ACCESS_TOKEN and INSTAGRAM_USER_ID.")
+        return _mock_post("instagram", text, image_urls)
 
+    # ── Real API call ───────────────────────────────────────────────────
+    req = _get_requests()
     base_url = f"https://graph.facebook.com/v19.0/{INSTAGRAM_USER_ID}"
 
     # Step 1: Create media container
-    media_payload: dict = {
+    media_payload = {
         "caption": text,
         "access_token": INSTAGRAM_ACCESS_TOKEN,
     }
@@ -159,7 +186,7 @@ def post_to_instagram(text: str, image_urls: list[str] | None = None) -> dict:
     else:
         raise ValueError("Instagram posts require at least one image URL.")
 
-    resp1 = requests.post(f"{base_url}/media", data=media_payload, timeout=30)
+    resp1 = req.post(f"{base_url}/media", data=media_payload, timeout=30)
     resp1.raise_for_status()
     creation_id = resp1.json().get("id")
 
@@ -171,7 +198,7 @@ def post_to_instagram(text: str, image_urls: list[str] | None = None) -> dict:
         "creation_id": creation_id,
         "access_token": INSTAGRAM_ACCESS_TOKEN,
     }
-    resp2 = requests.post(f"{base_url}/media_publish", data=publish_payload, timeout=30)
+    resp2 = req.post(f"{base_url}/media_publish", data=publish_payload, timeout=30)
     resp2.raise_for_status()
     return resp2.json()
 
@@ -196,13 +223,21 @@ def process_row(row: dict) -> dict:
     raw_images = row.get("image_urls", "")
 
     # Build full image URLs from repo-relative paths
-    image_urls = [build_image_url(p) for p in raw_images.split(";") if p.strip()] if raw_images else []
+    image_urls = (
+        [build_image_url(p) for p in raw_images.split(";") if p.strip()]
+        if raw_images
+        else []
+    )
 
     handler = PLATFORM_HANDLERS.get(platform)
     if not handler:
         row["status"] = "error"
         row["error_log"] = f"Unknown platform: {platform}"
-        logger.error("Unknown platform '%s' for row dated %s", platform, row.get("scheduled_date"))
+        logger.error(
+            "Unknown platform '%s' for row dated %s",
+            platform,
+            row.get("scheduled_date"),
+        )
         return row
 
     try:
@@ -210,11 +245,13 @@ def process_row(row: dict) -> dict:
         row["status"] = "posted"
         row["posted_at"] = datetime.now(timezone.utc).isoformat()
         row["error_log"] = ""
-        logger.info("✅ Posted to %s (id: %s)", platform, result.get("id", "n/a"))
+        logger.info(
+            "Posted to %s (id: %s)", platform, result.get("id", "n/a")
+        )
     except Exception as exc:
         row["status"] = "error"
         row["error_log"] = str(exc)[:500]
-        logger.error("❌ Failed posting to %s: %s", platform, exc)
+        logger.error("Failed posting to %s: %s", platform, exc)
 
     return row
 
@@ -222,7 +259,7 @@ def process_row(row: dict) -> dict:
 def main() -> None:
     """Main entry point: filter today's pending rows, post them, save CSV."""
     logger.info("=" * 60)
-    logger.info("Content Ops Automation — Run started")
+    logger.info("Content Ops Automation - Run started")
     logger.info("Dry-run mode: %s", DRY_RUN)
     logger.info("=" * 60)
 
@@ -235,7 +272,12 @@ def main() -> None:
         status = row.get("status", "").strip().lower()
 
         if scheduled == today and status == "pending":
-            logger.info("Processing: [%s] %s — %s", scheduled, row.get("platform"), row.get("text_content", "")[:50])
+            logger.info(
+                "Processing: [%s] %s - %s",
+                scheduled,
+                row.get("platform"),
+                row.get("text_content", "")[:50],
+            )
             process_row(row)
             any_changes = True
 
