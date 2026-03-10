@@ -1,21 +1,21 @@
-scheduled_date,platform,post_type,text_content,image_urls,status,posted_at,error_log
-2026-03-10,linkedin,text,"🚀 Hello World from AI Edu Automation!
+"scheduled_date","platform","post_type","text_content","image_urls","status","posted_at","error_log"
+"2026-03-10","linkedin","text","🚀 Hello World from AI Edu Automation!
 
 This is a placeholder post to test the Content Ops pipeline.
 
-#Python #Automation #AI",,pending,,
-2026-03-10,instagram,image,"📸 Test carousel post for Instagram.
+#Python #Automation #AI","","posted","2026-03-10T09:32:40.838862+00:00",""
+"2026-03-10","instagram","image","📸 Test carousel post for Instagram.
 
 Learning Python has never been easier!
 
-#LearnPython #PromptEngineering #GenAI",images/placeholder_01.png,pending,,
-2026-03-11,linkedin,text,"💡 Day 2: Prompt Engineering 101
+#LearnPython #PromptEngineering #GenAI","images/placeholder_01.png","posted","2026-03-10T09:32:40.839174+00:00",""
+"2026-03-11","linkedin","text","💡 Day 2: Prompt Engineering 101
 
 Tip: Always give context before asking your question.
 
-#PromptEngineering #AI #Productivity",,pending,,
-2026-03-11,instagram,image,"🎯 Time Management for Developers
+#PromptEngineering #AI #Productivity","","pending","",""
+"2026-03-11","instagram","image","🎯 Time Management for Developers
 
 Pomodoro + Deep Work = Unstoppable
 
-#TimeManagement #DevLife #Productivity",images/placeholder_02.png,pending,,
+#TimeManagement #DevLife #Productivity","images/placeholder_02.png","pending","",""
